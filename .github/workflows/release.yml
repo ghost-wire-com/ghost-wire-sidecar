@@ -1,0 +1,88 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+env:
+  AGENT: ghcr.io/ghost-wire-com/sidecar-agent
+  WORKER: ghcr.io/ghost-wire-com/sidecar-worker
+  APP: ghcr.io/ghost-wire-com/sidecar
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: node --test sidecar/agent/agent.test.mjs premium-agent/workspace-model-broker.test.mjs premium-agent/model-route.test.mjs premium-agent/model-route-core.test.mjs sidecar/preflight.test.mjs
+      - run: node --test sidecar/compose.test.mjs
+      - uses: actions/setup-go@v5
+        with: {go-version-file: engines/worker/go.mod}
+      - run: cd engines/worker && go vet ./... && go build ./...
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with: {registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}"}
+      - id: worker
+        uses: docker/build-push-action@v6
+        with:
+          context: engines/worker
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.WORKER }}:${{ github.ref_name }}
+          provenance: mode=max
+          sbom: true
+      - id: agent
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: sidecar/agent/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.AGENT }}:${{ github.ref_name }}
+          provenance: mode=max
+          sbom: true
+
+      # Signing and attestations only once the repository is public (Free plan;
+      # keyless signatures are recorded in the public Rekor log).
+      - if: github.event.repository.private == false
+        uses: sigstore/cosign-installer@v3
+      - if: github.event.repository.private == false
+        run: |
+          cosign sign --yes "${WORKER}@${{ steps.worker.outputs.digest }}"
+          cosign sign --yes "${AGENT}@${{ steps.agent.outputs.digest }}"
+      - if: github.event.repository.private == false
+        uses: actions/attest-build-provenance@v2
+        with: {subject-name: "${{ env.WORKER }}", subject-digest: "${{ steps.worker.outputs.digest }}", push-to-registry: true}
+      - if: github.event.repository.private == false
+        uses: actions/attest-build-provenance@v2
+        with: {subject-name: "${{ env.AGENT }}", subject-digest: "${{ steps.agent.outputs.digest }}", push-to-registry: true}
+
+      - name: Pin digests into the compose app
+        run: |
+          POSTGRES="postgres@$(docker buildx imagetools inspect postgres:16-alpine --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          sed -e "s#[$]{SIDECAR_AGENT_IMAGE:-[^}]*}#${AGENT}@${{ steps.agent.outputs.digest }}#g" \
+              -e "s#[$]{SIDECAR_WORKER_IMAGE:-[^}]*}#${WORKER}@${{ steps.worker.outputs.digest }}#g" \
+              -e "s#[$]{SIDECAR_POSTGRES_IMAGE:-[^}]*}#${POSTGRES}#g" sidecar/compose.yml > compose.yml
+          ! grep -q ':dev' compose.yml
+          ! grep -q '[$]{' compose.yml   # any variable makes Docker prompt on oci:// runs
+      - name: Publish the compose app
+        run: docker compose -f compose.yml publish -y "${APP}:${GITHUB_REF_NAME#v}"
+      - name: GitHub release with the pinned compose file
+        env: {GH_TOKEN: "${{ github.token }}"}
+        run: |
+          sha256sum compose.yml > compose.yml.sha256
+          gh release create "${GITHUB_REF_NAME}" compose.yml compose.yml.sha256 --title "${GITHUB_REF_NAME}" --notes "Images: ${WORKER}@${{ steps.worker.outputs.digest }} and ${AGENT}@${{ steps.agent.outputs.digest }}"

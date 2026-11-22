@@ -1,0 +1,5 @@
+{
+  "deny": ["*:free", "*embed*", "*tts*", "*whisper*", "*transcribe*", "*image*", "*dall-e*", "*moderation*", "*realtime*", "*audio*"],
+  "allow_only": {},
+  "min_context_tokens": 32000
+}

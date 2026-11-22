@@ -1,0 +1,116 @@
+# Ghost Wire Sidecar — runs your Ghost Wire workspace on this computer.
+# Install/pair: copy the one line from Ghost Wire → Use my computer.
+# Tools see only ONE folder: ~/GhostWire. No ports are opened.
+# The published app contains no variables (Docker then runs it without prompts);
+# release CI replaces the image variables below with digests.
+# Outbound traffic: app.ghost-wire.com (and your own AI provider if you add a key).
+name: ghostwire-sidecar
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+
+services:
+  setup:
+    <<: *hardening
+    restart: "no"
+    profiles: [setup]
+    image: ${SIDECAR_AGENT_IMAGE:-ghcr.io/ghost-wire-com/sidecar-agent:dev}
+    user: "0"
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]   # short-lived: writes state for the agent user, worker secrets root-only
+    entrypoint: ["node", "/app/agent/sidecar/agent/cli.mjs", "setup"]
+    environment:
+      GHOSTWIRE_FOLDER: ~/GhostWire
+      GHOSTWIRE_WORKER_SECRETS_DIR: /worker-secrets
+    volumes:
+      - state:/state
+      - worker-secrets:/worker-secrets
+    networks: [outbound]
+
+  postgres:
+    image: ${SIDECAR_POSTGRES_IMAGE:-postgres:16-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: workspace
+      POSTGRES_DB: workspace
+      POSTGRES_PASSWORD_FILE: /worker-secrets/postgres-password
+    volumes:
+      - database:/var/lib/postgresql/data
+      - worker-secrets:/worker-secrets:ro
+    networks: [private]
+    mem_limit: 384m
+
+  worker:
+    <<: *hardening
+    image: ${SIDECAR_WORKER_IMAGE:-ghcr.io/ghost-wire-com/sidecar-worker:dev}
+    cap_add: [CHOWN, SETUID, SETGID, SETPCAP]   # used once by the entrypoint, then all dropped
+    depends_on: [postgres]
+    command: ["-addr", ":8787", "-proxy", ":8788", "-data", "/app/data"]
+    environment:
+      GHOSTWIRE_SECRETS_DIR: /worker-secrets
+      GHOSTWIRE_RUN_AS: auto   # owner of the shared folder, or 1000
+      GHOSTWIRE_LLM_PROVIDER: openai
+      GHOSTWIRE_LLM_MODEL: ghostwire
+      GHOSTWIRE_LLM_BASE_URL: http://model-broker:8791/v1
+      GHOSTWIRE_SIDECAR_WORKSPACE: /workspace
+      GHOSTWIRE_SKILL_DIR: /app/data/skills
+    tmpfs:
+      - /tmp:size=268435456,mode=1777
+      - /run:size=1048576,mode=0755
+    volumes:
+      - data:/app/data
+      - worker-secrets:/worker-secrets:ro
+      - type: volume
+        source: worker-secrets
+        target: /app/jwt.key
+        read_only: true
+        volume: {subpath: jwt.key}
+      - type: bind
+        source: ~/GhostWire
+        target: /workspace
+        bind: {create_host_path: true}
+    networks: [private]
+    mem_limit: 4g
+    cpus: 2
+    pids_limit: 512
+
+  model-broker:
+    <<: *hardening
+    image: ${SIDECAR_AGENT_IMAGE:-ghcr.io/ghost-wire-com/sidecar-agent:dev}
+    command: ["broker"]
+    environment:
+      WORKSPACE_MODE: sidecar
+      MODEL_ENDPOINT: https://app.ghost-wire.com/
+      GHOST_WIRE_API_ORIGINS: https://app.ghost-wire.com
+      MODEL_ID: ghostwire
+    volumes:
+      - state:/state:ro
+      - route:/route
+    networks: [private, outbound]
+    mem_limit: 128m
+
+  connector:
+    <<: *hardening
+    image: ${SIDECAR_AGENT_IMAGE:-ghcr.io/ghost-wire-com/sidecar-agent:dev}
+    command: ["connector"]
+    depends_on: [worker, model-broker]
+    environment:
+      GHOSTWIRE_FOLDER: ~/GhostWire
+    volumes:
+      - state:/state
+      - route:/route
+    networks: [private, outbound]
+    mem_limit: 256m
+
+volumes:
+  state: {}
+  worker-secrets: {}
+  database: {}
+  data: {}
+  route: {}
+
+networks:
+  private: {internal: true}
+  outbound: {}

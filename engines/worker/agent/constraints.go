@@ -1,0 +1,49 @@
+package agent
+
+import (
+	"strings"
+
+	"ghost-wire/worker/db"
+)
+
+// constraintBlock renders this task's operation constraints (task_constraints) as a
+// high-priority block appended to the planner/worker system prompt. allow/deny are
+// grouped; empty string when there are no constraints (or ts is nil). The framing
+// deliberately puts these ABOVE the exploration/expansion heuristics so a declared
+// boundary wins the tug-of-war against "chase another entry surface".
+func constraintBlock(ts *db.ExplorationStore) string {
+	if ts == nil {
+		return ""
+	}
+	rows, err := ts.ListConstraints()
+	if err != nil || len(rows) == 0 {
+		return ""
+	}
+	var allow, deny []string
+	for _, c := range rows {
+		text := strings.TrimSpace(c.Text)
+		if text == "" {
+			continue
+		}
+		if c.Kind == "allow" {
+			allow = append(allow, "- "+text)
+		} else {
+			deny = append(deny, "- "+text)
+		}
+	}
+	if len(allow) == 0 && len(deny) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n[Operating constraints (the highest priority, overriding every exploration/surface-widening heuristic below; before generating any intent and before performing any action you must self-check against them, and anything that violates them must not be done)]:")
+	if len(allow) > 0 {
+		b.WriteString("\nPermitted operations:\n")
+		b.WriteString(strings.Join(allow, "\n"))
+	}
+	if len(deny) > 0 {
+		b.WriteString("\nForbidden operations:\n")
+		b.WriteString(strings.Join(deny, "\n"))
+	}
+	b.WriteString("\n(Discovering a new target/port/host outside the constraints does not grant authorization: unless it falls within the permitted scope above, record it as an out-of-scope fact and skip it; no intent may be derived for it and no action performed against it.)")
+	return b.String()
+}

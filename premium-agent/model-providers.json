@@ -1,0 +1,13 @@
+{
+  "providers": [
+    {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1", "models_auth": "bearer", "key_pattern": "^sk-(?!ant-)[A-Za-z0-9_-]{20,}$", "enabled": true},
+    {"id": "anthropic", "name": "Anthropic", "base_url": "https://api.anthropic.com/v1", "models_auth": "anthropic", "key_pattern": "^sk-ant-api\\d{2}-[A-Za-z0-9_-]{20,}$", "enabled": true},
+    {"id": "openrouter", "name": "OpenRouter", "base_url": "https://openrouter.ai/api/v1", "models_auth": "bearer", "key_pattern": null, "enabled": true},
+    {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com", "models_auth": "bearer", "key_pattern": null, "enabled": true},
+    {"id": "groq", "name": "Groq", "base_url": "https://api.groq.com/openai/v1", "models_auth": "bearer", "key_pattern": null, "enabled": true},
+    {"id": "together", "name": "Together", "base_url": "https://api.together.xyz/v1", "models_auth": "bearer", "key_pattern": null, "enabled": true},
+    {"id": "mistral", "name": "Mistral", "base_url": "https://api.mistral.ai/v1", "models_auth": "bearer", "key_pattern": null, "enabled": true},
+    {"id": "xai", "name": "xAI", "base_url": "https://api.x.ai/v1", "models_auth": "bearer", "key_pattern": null, "enabled": true},
+    {"id": "gemini", "name": "Google Gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "models_auth": "bearer", "key_pattern": "^AIza[0-9A-Za-z_-]{30,}$", "enabled": true}
+  ]
+}
