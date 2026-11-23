@@ -8,6 +8,6 @@
     {"id": "together", "name": "Together", "base_url": "https://api.together.xyz/v1", "models_auth": "bearer", "key_pattern": null, "enabled": true},
     {"id": "mistral", "name": "Mistral", "base_url": "https://api.mistral.ai/v1", "models_auth": "bearer", "key_pattern": null, "enabled": true},
     {"id": "xai", "name": "xAI", "base_url": "https://api.x.ai/v1", "models_auth": "bearer", "key_pattern": null, "enabled": true},
-    {"id": "gemini", "name": "Google Gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "models_auth": "bearer", "key_pattern": "^AIza[0-9A-Za-z_-]{30,}$", "enabled": true}
+    {"id": "gemini", "name": "Google Gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "models_auth": "bearer", "key_pattern": "^(AIza[0-9A-Za-z_-]{30,}|AQ\\.[0-9A-Za-z_-]{30,})$", "enabled": true}
   ]
 }

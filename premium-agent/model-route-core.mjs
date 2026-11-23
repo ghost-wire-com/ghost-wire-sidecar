@@ -38,6 +38,9 @@ export function modelAllowed(filter, providerId, model, contextTokens) {
   return true;
 }
 
+// Pasted keys often carry a trailing space or line break; never let that fail a real key.
+export const normalizeKey = key => (typeof key === 'string' ? key.trim() : key);
+
 export function validateKey(provider, key) {
   if (typeof key !== 'string') return {ok: false, code: 'invalid_key_format'};
   if (/^sk-ant-oat/i.test(key) || /^eyJ[\w-]*\.[\w-]+\./.test(key)) return {ok: false, code: 'subscription_token'};

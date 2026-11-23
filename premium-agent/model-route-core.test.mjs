@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomBytes} from 'node:crypto';
 import {
-  loadRegistry, loadFilter, modelAllowed, validateKey, validateModelId, readMasterKey,
+  loadRegistry, loadFilter, modelAllowed, validateKey, validateModelId, readMasterKey, normalizeKey,
   encryptKey, decryptKey, readRoute, writeRoute, modelIds, ROUTE_FILE,
 } from './model-route-core.mjs';
 
@@ -106,4 +106,20 @@ test('modelIds normalizes list shapes', () => {
   assert.deepEqual(modelIds([{id: 'x'}]), ['x']);
   assert.deepEqual(modelIds('nope'), []);
   assert.equal(modelIds({data: Array.from({length: 600}, (_, i) => ({id: 'm' + i}))}).length, 500);
+});
+
+test('Gemini accepts both the classic AIza and the newer AQ. AI Studio key formats', () => {
+  const registry = loadRegistry(registryFile);
+  const gemini = registry.get('gemini');
+  assert.deepEqual(validateKey(gemini, 'AIza' + 'A1b_-'.repeat(7)), {ok: true});
+  assert.deepEqual(validateKey(gemini, 'AQ.' + 'Ab8RN6KLtZ-_'.repeat(4)), {ok: true});
+  assert.equal(validateKey(gemini, 'AQ.short').code, 'invalid_key_format');
+  assert.equal(validateKey(gemini, 'sk-proj-' + 'a'.repeat(40)).code, 'invalid_key_format');
+});
+
+test('normalizeKey trims pasted whitespace and leaves other values alone', () => {
+  assert.equal(normalizeKey('  AQ.abc\r\n'), 'AQ.abc');
+  assert.equal(normalizeKey('\tsk-proj-x '), 'sk-proj-x');
+  assert.equal(normalizeKey(undefined), undefined);
+  assert.equal(normalizeKey(42), 42);
 });

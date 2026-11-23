@@ -4,7 +4,7 @@ import {existsSync, readFileSync, rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {
-  loadRegistry, loadFilter, modelAllowed, validateKey, validateModelId, readMasterKey,
+  loadRegistry, loadFilter, modelAllowed, validateKey, validateModelId, readMasterKey, normalizeKey,
   encryptKey, decryptKey, readRoute, writeRoute, modelIds, SOURCES, ROUTE_FILE, STATS_FILE,
 } from './model-route-core.mjs';
 
@@ -87,6 +87,7 @@ export function createModelRouteHandler(config, json, deps = {}) {
       if (!dir || !keyFile || !existsSync(dir) || !existsSync(keyFile)) fail('model_route_unavailable', 'Your workspace needs an update before you can add your own key.', 503);
       const sub = path.slice('/engine/model-route'.length), method = req.method;
       const body = ['POST', 'PUT'].includes(method) ? await readBody(req) : {};
+      if (Object.hasOwn(body, 'key')) body.key = normalizeKey(body.key);
       if (Object.hasOwn(body, 'base_url')) fail('base_url_not_allowed', 'Custom provider URLs are not allowed.');
       const registry = loadRegistry(providersFile), filter = loadFilter(filterFile);
       if (method === 'GET' && sub === '/providers') return json(res, 200, {providers: [...registry.values()].filter(p => p.enabled).map(p => ({id: p.id, name: p.name}))}), true;
