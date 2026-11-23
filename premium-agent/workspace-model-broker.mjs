@@ -10,6 +10,9 @@ import {pathToFileURL} from 'node:url';
 // enrolled before BYOK mount only this file: they keep the Ghost Wire route.
 let core = null;
 try { core = await import('./model-route-core.mjs'); } catch {}
+// Optional like core: an older mount set without this file keeps working, minus Gemini 3 tool signatures.
+let signatures = null;
+try { signatures = await import('./gemini-signatures.mjs'); } catch {}
 
 const FALLBACK_STATUS = new Set([401, 403, 408, 429]);
 const HOUR = 3600_000;
@@ -42,6 +45,7 @@ export function createBroker({env, routeDir, masterKeyFile, providersFile, filte
   let providers = registry || null, filter = null, route = null, configError = false, brokenSource = null, seen = '';
   let failures = 0, openUntil = 0, authLocked = null;
   const stats = {hours: {}, last_route: null, last_error_class: null};
+  const geminiSignatures = signatures ? signatures.createSignatureStore() : null;
   let statsTimer = null;
   const mtime = file => { try { return statSync(file).mtimeMs; } catch { return 0; } };
   function refresh() {
@@ -105,6 +109,17 @@ export function createBroker({env, routeDir, masterKeyFile, providersFile, filte
     res.on('close', () => upstream.destroy());
     upstream.end(body);
   }
+  // Read Gemini's thought signatures off the reply as it streams to the worker.
+  function captureSignatures(upstream) {
+    if (/text\/event-stream/i.test(upstream.headers['content-type'] || '')) {
+      const capture = geminiSignatures.sseCapture();
+      upstream.on('data', chunk => capture.write(chunk));
+      return;
+    }
+    const chunks = []; let size = 0;
+    upstream.on('data', chunk => { size += chunk.length; if (size <= 8 * 1024 * 1024) chunks.push(chunk); });
+    upstream.on('end', () => { if (size <= 8 * 1024 * 1024) { try { geminiSignatures.captureJson(JSON.parse(Buffer.concat(chunks))); } catch {} } });
+  }
   async function user(res, payload, path, current) {
     const fallback = current.source === 'user-then-ghostwire';
     const failed = (errorClass, upstream) => {
@@ -115,7 +130,9 @@ export function createBroker({env, routeDir, masterKeyFile, providersFile, filte
     };
     if (!core.modelAllowed(filter, current.provider.id, current.model)) return failed('model_not_allowed');
     if (authLocked === current.key_enc || (failures >= 3 && now() < openUntil)) return failed(authLocked === current.key_enc ? 'auth' : 'provider_down');
-    const body = Buffer.from(JSON.stringify({...payload, model: current.model}));
+    const gemini = current.provider.id === 'gemini' && geminiSignatures !== null;
+    const sendPayload = gemini ? geminiSignatures.restore(payload) : payload;
+    const body = Buffer.from(JSON.stringify({...sendPayload, model: current.model}));
     let upstream;
     try { upstream = await send(new URL(current.provider.base_url + '/chat/completions'), {authorization: 'Bearer ' + current.key}, body, payload.stream === true ? firstByteMs : nonStreamMs); }
     catch { failures++; if (failures >= 3) openUntil = now() + 60_000; return failed('provider_down'); }
@@ -128,6 +145,7 @@ export function createBroker({env, routeDir, masterKeyFile, providersFile, filte
     failures = 0;
     note(status < 400 ? 'user' : 'error', null, 'user');
     res.on('close', () => upstream.destroy());
+    if (gemini && status < 400) captureSignatures(upstream);
     reply(res, upstream, 'user');
   }
 

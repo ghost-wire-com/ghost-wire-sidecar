@@ -123,3 +123,11 @@ test('normalizeKey trims pasted whitespace and leaves other values alone', () =>
   assert.equal(normalizeKey(undefined), undefined);
   assert.equal(normalizeKey(42), 42);
 });
+
+test('Anthropic accepts current key types but never subscription (oat) tokens', () => {
+  const anthropic = loadRegistry(registryFile).get('anthropic');
+  assert.deepEqual(validateKey(anthropic, 'sk-ant-api03-' + 'a'.repeat(40)), {ok: true});
+  assert.deepEqual(validateKey(anthropic, 'sk-ant-admin01-' + 'a'.repeat(40)), {ok: true});
+  assert.equal(validateKey(anthropic, 'sk-ant-oat01-' + 'a'.repeat(40)).code, 'subscription_token');
+  assert.equal(validateKey(anthropic, 'sk-proj-' + 'a'.repeat(40)).code, 'invalid_key_format');
+});

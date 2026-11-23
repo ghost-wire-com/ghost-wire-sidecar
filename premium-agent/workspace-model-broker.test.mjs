@@ -25,7 +25,7 @@ async function fake(handler) {
   return server;
 }
 
-async function setup({source = 'user-then-ghostwire', user, gw, model = 'user-model', firstByteMs = 2000, nonStreamMs = 4000, now} = {}) {
+async function setup({source = 'user-then-ghostwire', user, gw, model = 'user-model', firstByteMs = 2000, nonStreamMs = 4000, now, providerId = 'fake'} = {}) {
   const userServer = await fake(user || ((req, res) => res.end('{"from":"user"}')));
   const gwServer = await fake(gw || ((req, res) => res.end('{"from":"ghostwire"}')));
   const dir = mkdtempSync(join(tmpdir(), 'broker-')), master = randomBytes(32);
@@ -34,9 +34,9 @@ async function setup({source = 'user-then-ghostwire', user, gw, model = 'user-mo
   writeFileSync(filterFile, JSON.stringify({deny: ['*:free'], allow_only: {}, min_context_tokens: 0}));
   const routeDir = join(dir, 'route');
   (await import('node:fs')).mkdirSync(routeDir);
-  const route = {version: 1, source, provider: 'fake', model, key_enc: encryptKey(master, USER_KEY), key_last4: 'uuuu', updated_at: 1};
+  const route = {version: 1, source, provider: providerId, model, key_enc: encryptKey(master, USER_KEY), key_last4: 'uuuu', updated_at: 1};
   writeRoute(routeDir, route);
-  const registry = new Map([['fake', {id: 'fake', name: 'Fake', base_url: userServer.url + '/v1', models_auth: 'bearer', key_pattern: null, enabled: true}]]);
+  const registry = new Map([[providerId, {id: providerId, name: 'Fake', base_url: userServer.url + '/v1', models_auth: 'bearer', key_pattern: null, enabled: true}]]);
   const broker = createBroker({
     env: {WORKSPACE_MODE: 'premium', MODEL_ENDPOINT: gwServer.url + '/', MODEL_UPSTREAM_TOKEN: GW_KEY, WORKSPACE_MODEL_TOKEN: SCOPED, MODEL_ID: 'gw-model'},
     routeDir, masterKeyFile, filterFile, registry, pollMs: 20, statsMs: 0, firstByteMs, nonStreamMs, now,
@@ -246,4 +246,37 @@ test('a transient route read error recovers without a file change', async t => {
   utimesSync(file, atime, new Date(mtime.getTime() + 5000));
   await delay(100);
   assert.equal((await s.call()).headers.get('x-ghostwire-route'), 'user');
+});
+
+const SIGNED_STREAM = [
+  {choices: [{delta: {role: 'assistant', tool_calls: [{index: 0, id: 'call-1', type: 'function', function: {name: 'Write', arguments: ''}, extra_content: {google: {thought_signature: 'REAL-SIG'}}}]}}]},
+  {choices: [{delta: {tool_calls: [{index: 0, function: {arguments: '{"path":"hello.txt"}'}}]}, finish_reason: 'tool_calls'}]},
+].map(event => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n';
+const followUp = {model: 'ghostwire', stream: true, messages: [
+  {role: 'user', content: 'write hello'},
+  {role: 'assistant', content: null, tool_calls: [{id: 'call-1', type: 'function', function: {name: 'Write', arguments: '{"path":"hello.txt"}'}}]},
+  {role: 'tool', tool_call_id: 'call-1', content: 'written'},
+]};
+const signer = (req, res) => { res.writeHead(200, {'content-type': 'text/event-stream'}); res.end(SIGNED_STREAM); };
+
+test('Gemini: thought signatures from a streamed tool call are sent back on the next turn', async t => {
+  const s = await setup({providerId: 'gemini', user: signer}); t.after(s.close);
+  assert.match(await (await s.call(undefined, {model: 'ghostwire', stream: true, messages: [{role: 'user', content: 'write hello'}]})).text(), /REAL-SIG/);
+  await (await s.call(undefined, followUp)).text();
+  const sent = JSON.parse(s.userServer.hits[1].body);
+  assert.equal(sent.messages[1].tool_calls[0].extra_content.google.thought_signature, 'REAL-SIG');
+  assert.equal(sent.model, 'user-model');
+});
+
+test('Gemini: a tool call the broker never saw gets the placeholder signature', async t => {
+  const s = await setup({providerId: 'gemini', user: signer}); t.after(s.close);
+  await (await s.call(undefined, followUp)).text();
+  assert.equal(JSON.parse(s.userServer.hits[0].body).messages[1].tool_calls[0].extra_content.google.thought_signature, 'skip_thought_signature_validator');
+});
+
+test('other providers receive tool calls unchanged', async t => {
+  const s = await setup({user: signer}); t.after(s.close);
+  await (await s.call(undefined, {model: 'ghostwire', stream: true, messages: [{role: 'user', content: 'write hello'}]})).text();
+  await (await s.call(undefined, followUp)).text();
+  assert.equal(JSON.parse(s.userServer.hits[1].body).messages[1].tool_calls[0].extra_content, undefined);
 });
