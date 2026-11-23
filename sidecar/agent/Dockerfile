@@ -4,7 +4,7 @@ ENV NODE_ENV=production NODE_NO_WARNINGS=1
 WORKDIR /app/agent
 COPY premium-agent/server.mjs premium-agent/engine-proxy.mjs premium-agent/chat.mjs premium-agent/workspace-provisioner.mjs \
      premium-agent/workspace-model-broker.mjs premium-agent/worker-access.mjs premium-agent/model-route.mjs \
-     premium-agent/model-route-core.mjs premium-agent/gemini-signatures.mjs premium-agent/mining-proxy.mjs \
+     premium-agent/model-route-core.mjs premium-agent/provider-adapters.mjs premium-agent/mining-proxy.mjs \
      premium-agent/model-providers.json premium-agent/model-filter.json ./premium-agent/
 COPY sidecar/connection.mjs sidecar/preflight.mjs ./sidecar/
 COPY sidecar/agent/secrets.mjs sidecar/agent/folder.mjs sidecar/agent/setup.mjs sidecar/agent/connector.mjs sidecar/agent/cli.mjs ./sidecar/agent/

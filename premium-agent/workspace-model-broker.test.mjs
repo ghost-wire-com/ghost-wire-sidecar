@@ -280,3 +280,26 @@ test('other providers receive tool calls unchanged', async t => {
   await (await s.call(undefined, followUp)).text();
   assert.equal(JSON.parse(s.userServer.hits[1].body).messages[1].tool_calls[0].extra_content, undefined);
 });
+
+test('Mistral: tool-call ids are rewritten to 9 alphanumerics before reaching the provider', async t => {
+  const s = await setup({providerId: 'mistral'}); t.after(s.close);
+  await (await s.call(undefined, followUp)).text();
+  const sent = JSON.parse(s.userServer.hits[0].body);
+  assert.match(sent.messages[1].tool_calls[0].id, /^[a-zA-Z0-9]{9}$/);
+  assert.equal(sent.messages[2].tool_call_id, sent.messages[1].tool_calls[0].id);
+});
+
+test('Anthropic: sampling fields the provider rejects are removed', async t => {
+  const s = await setup({providerId: 'anthropic'}); t.after(s.close);
+  await (await s.call(undefined, {model: 'ghostwire', temperature: 0.1, top_p: 0.5, tool_choice: 'required', messages: [{role: 'user', content: 'hi'}]})).text();
+  const sent = JSON.parse(s.userServer.hits[0].body);
+  assert.equal(sent.temperature, undefined);
+  assert.equal(sent.top_p, undefined);
+  assert.equal(sent.tool_choice, 'auto');
+});
+
+test('Ghost Wire route never gets provider rewrites', async t => {
+  const s = await setup({source: 'ghostwire', providerId: 'anthropic'}); t.after(s.close);
+  await (await s.call(undefined, {model: 'ghostwire', temperature: 0.1, messages: [{role: 'user', content: 'hi'}]})).text();
+  assert.equal(JSON.parse(s.gwServer.hits[0].body).temperature, 0.1);
+});
