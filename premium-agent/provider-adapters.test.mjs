@@ -129,3 +129,11 @@ test('bad input never throws and memory stays bounded', () => {
   assert.deepEqual(store.restore('gemini', null), null);
   assert.deepEqual(adaptRequest('mistral', null), null);
 });
+
+test('gemini: drops sampling fields its OpenAI endpoint rejects, keeps the rest', () => {
+  const payload = {model: 'm', temperature: 0.7, top_p: 0.9, max_tokens: 100, stream: true, frequency_penalty: 0, presence_penalty: 0.1, logit_bias: {}, logprobs: false, top_logprobs: 2, messages: []};
+  const out = adaptRequest('gemini', payload);
+  for (const field of ['frequency_penalty', 'presence_penalty', 'logit_bias', 'logprobs', 'top_logprobs']) assert.equal(out[field], undefined, field);
+  assert.deepEqual([out.temperature, out.top_p, out.max_tokens, out.stream], [0.7, 0.9, 100, true]);
+  assert.equal(payload.frequency_penalty, 0, 'input not mutated');
+});

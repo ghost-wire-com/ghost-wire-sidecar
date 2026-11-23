@@ -10,6 +10,7 @@
 // Request rules (pure):
 //   mistral    tool-call ids must be exactly 9 alphanumerics; tool_choice "required" is called "any"
 //   anthropic  rejects temperature/top_p on newer models, n > 1 and a forced tool_choice
+//   gemini     rejects frequency_penalty, presence_penalty, logit_bias, logprobs, top_logprobs
 import {createHash} from 'node:crypto';
 
 export const PLACEHOLDER_SIGNATURE = 'skip_thought_signature_validator';
@@ -158,6 +159,12 @@ export function adaptRequest(providerId, payload) {
       if (message?.role === 'tool' && typeof message.tool_call_id === 'string') return {...message, tool_call_id: mistralId(message.tool_call_id)};
       return message;
     });
+    return out;
+  }
+  if (providerId === 'gemini') {
+    // Gemini's OpenAI-compatible endpoint returns 400 "Unknown name" for these.
+    const out = {...payload};
+    for (const field of ['frequency_penalty', 'presence_penalty', 'logit_bias', 'logprobs', 'top_logprobs']) delete out[field];
     return out;
   }
   if (providerId === 'anthropic') {
