@@ -142,6 +142,7 @@ test('connectorConfig builds the adapter from state', async () => {
   assert.equal(config.modelRouteDir, '/route');
   assert.equal(config.miningOrigin, 'http://127.0.0.1:1/'); // own-PC has no mining node
   assert.equal(config.miningSecret, undefined);
+  assert.deepEqual(config.modelChat, {url: 'http://model-broker:8791', token: readFileSync(join(stateDir, 'scoped-token'), 'utf8')});
   assert.equal(config.modelRouteKeyFile, join(stateDir, 'model-route.key'));
   assert.ok(existsSync(config.modelRouteKeyFile));
 });

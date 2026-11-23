@@ -93,6 +93,9 @@ type Server struct {
 	profMu         sync.Mutex
 	profChatAgents map[int64]*agent.ChatAgent // per-profile ChatAgent cache (chat page)
 
+	// routes caches providers/chat agents per saved bring-your-own-key route ("byok:<id>").
+	routes routeCache
+
 	// provByProfile caches ONE provider per LLM profile id so every agent bound or
 	// pinned to the same profile shares a single provider instance — hence one rate
 	// limiter. applyLLM also resolves the persisted global-active profile through this
@@ -483,6 +486,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.llmCfg = cfg
 	s.llmOn = true
 	s.cfgMu.Unlock()
+	s.routes.reset()
 	s.invalidateTaskAgents()
 
 	// wake the active task so a task created while idle starts exploring.
@@ -539,6 +543,11 @@ func (s *Server) resolveChatAgent(c *db.Conversation) *agent.ChatAgent {
 	if eff := s.effectiveProfileForAgent(c.AgentKey, c.LLMProfileID); eff != nil {
 		if pa := s.chatAgentForProfile(*eff); pa != nil {
 			ca = pa
+		}
+	} else if route := s.pinnedRoute("conversation", c.ID); route != "" {
+		// Workspace only: the conversation picked one of the user's saved keys.
+		if ra := s.chatAgentForRoute(route); ra != nil {
+			ca = ra
 		}
 	}
 	return ca
@@ -637,6 +646,7 @@ func (s *Server) invalidateProfileAgents() {
 	s.profMu.Lock()
 	s.profChatAgents = map[int64]*agent.ChatAgent{}
 	s.profMu.Unlock()
+	s.routes.reset()
 	s.provCacheMu.Lock()
 	s.provCacheGen++
 	s.provByProfile = map[int64]*provEntry{}
@@ -830,6 +840,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/conversations/delete/batch", s.pgDeleteConversationsBatch)
 	mux.HandleFunc("PATCH /api/conversations/{id}", s.pgRenameConversation)
 	mux.HandleFunc("PATCH /api/conversations/{id}/profile", s.pgUpdateConversation)
+	mux.HandleFunc("GET /api/model-routes", s.listModelRoutes)
+	mux.HandleFunc("GET /api/conversations/{id}/route", s.modelRouteHandler("conversation"))
+	mux.HandleFunc("PUT /api/conversations/{id}/route", s.modelRouteHandler("conversation"))
+	mux.HandleFunc("GET /api/tasks/{id}/route", s.modelRouteHandler("task"))
+	mux.HandleFunc("PUT /api/tasks/{id}/route", s.modelRouteHandler("task"))
 	mux.HandleFunc("DELETE /api/conversations/{id}", s.pgDeleteConversation)
 	mux.HandleFunc("GET /api/conversations/{id}/messages", s.pgConversationMessages)
 	mux.HandleFunc("POST /api/conversations/{id}/messages", s.pgSendConversationMessage)
@@ -1526,6 +1541,8 @@ type createTaskReq struct {
 	CoverageEnabled      *bool    `json:"coverage_enabled,omitempty"`  // the asset coverage feature; omitted/null = on by default (true). false = turn off coverage computation/display/automatic scope accumulation and hide add_task_scope/list_untested_assets. Company links are unaffected.
 	// InterceptRules are task-level asset block/allow rules (entered on creation, stored in task_intercept_rules and never in the global table).
 	InterceptRules []taskInterceptRuleReq `json:"intercept_rules,omitempty"`
+	// ModelRoute picks one of the user's saved keys in a workspace ("byok:<id>", "ghostwire"; empty = default).
+	ModelRoute string `json:"model_route,omitempty"`
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -1542,6 +1559,10 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.validateTaskProfileIDs(req.LLMProfileIDs); err != nil {
 		writeErr(w, 400, err.Error())
+		return
+	}
+	if !db.ValidModelRoute(req.ModelRoute) {
+		writeErr(w, 400, "model_route must be empty, \"ghostwire\" or \"byok:<id>\"")
 		return
 	}
 	if req.TimeoutSeconds < 0 {
@@ -1597,6 +1618,14 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[task] created task #%s %q goal: %s", t.ID, req.Description, req.Goal)
+	if req.ModelRoute != "" && s.m.pg != nil {
+		// Saved before launch so even the first AI call uses the chosen key.
+		if n, err := parseTaskID(t.ID); err == nil {
+			if err := s.m.pg.SetModelRoute("task", n, req.ModelRoute); err != nil {
+				log.Printf("[task] saving model route for #%s failed: %v", t.ID, err)
+			}
+		}
+	}
 	// The shared post-creation flow (seed + the seed intent + background goal decomposition + engine.Run), reused by spawn_task.
 	// launchTask is asynchronous internally and does not block the UI -- goal decomposition happens visibly in the background.
 	s.launchTask(t, req.Description+" "+req.Goal, req.SeedFirstIntent != nil && *req.SeedFirstIntent)

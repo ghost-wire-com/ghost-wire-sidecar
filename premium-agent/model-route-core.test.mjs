@@ -131,3 +131,65 @@ test('Anthropic accepts current key types but never subscription (oat) tokens', 
   assert.equal(validateKey(anthropic, 'sk-ant-oat01-' + 'a'.repeat(40)).code, 'subscription_token');
   assert.equal(validateKey(anthropic, 'sk-proj-' + 'a'.repeat(40)).code, 'invalid_key_format');
 });
+
+// ---- v2 route store (several saved keys) -------------------------------------------
+import * as routesCore from './model-route-core.mjs';
+const v1 = (source, extra = {}) => ({version: 1, source, provider: 'gemini', model: 'gemini-3.5-flash-lite', key_enc: 'v1:a:b:c', key_last4: 'wxyz', updated_at: 5, ...extra});
+
+test('readRoutes: no files means Ghost Wire default and no routes', () => {
+  assert.deepEqual(routesCore.readRoutes(temp()), {version: 2, default_id: 'ghostwire', routes: []});
+});
+
+test('readRoutes migrates a single v1 route without touching files', () => {
+  for (const [source, fallback, isDefault] of [['user', false, true], ['user-then-ghostwire', true, true], ['ghostwire', true, false]]) {
+    const dir = temp();
+    routesCore.writeRoute(dir, v1(source));
+    const store = routesCore.readRoutes(dir);
+    assert.equal(store.version, 2);
+    assert.equal(store.routes.length, 1, source);
+    const [route] = store.routes;
+    assert.match(route.id, /^[a-z2-7]{8}$/);
+    assert.equal(route.provider, 'gemini');
+    assert.equal(route.model, 'gemini-3.5-flash-lite');
+    assert.equal(route.key_enc, 'v1:a:b:c');
+    assert.equal(route.fallback, fallback, source);
+    assert.equal(store.default_id, isDefault ? route.id : 'ghostwire', source);
+    assert.equal(routesCore.readRoutes(dir).routes[0].id, route.id, 'stable id across reads');
+  }
+  const dir = temp();
+  routesCore.writeRoute(dir, {version: 1, source: 'ghostwire'});
+  assert.deepEqual(routesCore.readRoutes(dir).routes, [], 'Ghost Wire with no saved key migrates to no routes');
+});
+
+test('writeRoutes stores v2 and mirrors the default into the v1 file for older brokers', () => {
+  const dir = temp();
+  const a = {id: 'aaaaaaaa', label: 'Gemini', provider: 'gemini', model: 'm1', key_enc: 'v1:1:1:1', key_last4: '1111', fallback: true, updated_at: 1};
+  const b = {id: 'bbbbbbbb', label: 'OpenAI', provider: 'openai', model: 'm2', key_enc: 'v1:2:2:2', key_last4: '2222', fallback: false, updated_at: 2};
+  routesCore.writeRoutes(dir, {version: 2, default_id: 'bbbbbbbb', routes: [a, b]});
+  assert.deepEqual(routesCore.readRoutes(dir), {version: 2, default_id: 'bbbbbbbb', routes: [a, b]});
+  const mirror = routesCore.readRoute(dir);
+  assert.equal(mirror.source, 'user');
+  assert.equal(mirror.provider, 'openai');
+  assert.equal(mirror.key_enc, 'v1:2:2:2');
+  routesCore.writeRoutes(dir, {version: 2, default_id: 'ghostwire', routes: [a]});
+  assert.equal(routesCore.readRoute(dir).source, 'ghostwire');
+  if (process.platform !== 'win32') assert.equal(statSync(join(dir, routesCore.ROUTES_FILE)).mode & 0o777, 0o600);
+});
+
+test('writeRoutes refuses more than 12 routes, bad ids and a default that does not exist', () => {
+  const route = i => ({id: ('a' + i).padEnd(8, 'a').replace(/[^a-z2-7]/g, 'b'), label: 'x', provider: 'openai', model: 'm', key_enc: 'v1:1:1:1', key_last4: '1111', fallback: true, updated_at: 1});
+  const many = Array.from({length: 13}, (_, i) => ({...route(i), id: routesCore.newRouteId()}));
+  assert.throws(() => routesCore.writeRoutes(temp(), {version: 2, default_id: 'ghostwire', routes: many}));
+  assert.throws(() => routesCore.writeRoutes(temp(), {version: 2, default_id: 'ghostwire', routes: [{...route(1), id: 'BAD'}]}));
+  assert.throws(() => routesCore.writeRoutes(temp(), {version: 2, default_id: 'zzzzzzzz', routes: []}));
+});
+
+test('newRouteId is 8 base32 characters and publicRoutes never exposes keys', () => {
+  const ids = new Set(Array.from({length: 50}, () => routesCore.newRouteId()));
+  assert.equal(ids.size, 50);
+  for (const id of ids) assert.match(id, /^[a-z2-7]{8}$/);
+  const store = {version: 2, default_id: 'aaaaaaaa', routes: [{id: 'aaaaaaaa', label: 'G', provider: 'gemini', model: 'm', key_enc: 'v1:SECRET:x:y', key_last4: 'wxyz', fallback: true, updated_at: 1}]};
+  const view = routesCore.publicRoutes(store);
+  assert.deepEqual(view, {default_id: 'aaaaaaaa', routes: [{id: 'aaaaaaaa', label: 'G', provider: 'gemini', model: 'm', key_last4: 'wxyz', fallback: true}]});
+  assert.ok(!JSON.stringify(view).includes('SECRET'));
+});

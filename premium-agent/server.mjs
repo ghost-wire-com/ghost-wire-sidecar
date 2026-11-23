@@ -9,6 +9,7 @@ import { createEngineProxy } from './engine-proxy.mjs';
 import {createWorkspaceProvisioner} from './workspace-provisioner.mjs';
 import {createMiningProxy} from './mining-proxy.mjs';
 import {createModelRouteHandler} from './model-route.mjs';
+import {createModelChatHandler} from './model-chat.mjs';
 
 const json = (res, code, data) => {
   res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' });
@@ -79,6 +80,7 @@ export function createPremiumAgent(config) {
   const engineProxy = createEngineProxy(config, db, json);
   const miningProxy = createMiningProxy(config, json);
   const modelRoute = createModelRouteHandler(config, json);
+  const modelChat = createModelChatHandler(config, json);
   const server = http.createServer(async (req, res) => {
     try {
       const supplied = Buffer.from(req.headers.authorization || '');
@@ -88,6 +90,7 @@ export function createPremiumAgent(config) {
       if (userId !== config.testUserId) return json(res, 403, { error: 'This test workspace is unavailable' });
       if (await miningProxy(req,res)) return;
       if (await modelRoute(req,res)) return;
+      if (await modelChat(req,res)) return;
       if (await engineProxy(req,res)) return;
       const path = req.url;
       if (req.method === 'GET' && path === '/status') {

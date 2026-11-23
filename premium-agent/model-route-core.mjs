@@ -1,10 +1,14 @@
 // Shared by the gateway (save/test) and the workspace model broker (routing).
 // Pure helpers only: no network, no logging of credentials.
-import {readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync} from 'node:fs';
+import {readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync, rmSync} from 'node:fs';
 import {join} from 'node:path';
-import {createCipheriv, createDecipheriv, randomBytes} from 'node:crypto';
+import {createCipheriv, createDecipheriv, createHash, randomBytes} from 'node:crypto';
 
 export const ROUTE_FILE = 'route.private.json';
+// v2: several saved keys with one default. Wins over ROUTE_FILE when present.
+export const ROUTES_FILE = 'routes.private.json';
+export const MAX_ROUTES = 12;
+export const ROUTE_ID = /^[a-z2-7]{8}$/;
 export const STATS_FILE = 'stats.json';
 export const SOURCES = ['ghostwire', 'user-then-ghostwire', 'user'];
 
@@ -86,4 +90,49 @@ export function writeRoute(dir, route) {
 export function modelIds(value) {
   const list = Array.isArray(value) ? value : Array.isArray(value?.data) ? value.data : [];
   return [...new Set(list.map(item => item?.id).filter(id => validateModelId(id)))].sort().slice(0, 500);
+}
+
+const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567';
+const base32 = bytes => { let bits = 0, value = 0, out = ''; for (const byte of bytes) { value = (value << 8) | byte; bits += 8; while (bits >= 5) { out += BASE32[(value >>> (bits - 5)) & 31]; bits -= 5; } } return out; };
+export const newRouteId = () => base32(randomBytes(5));
+// Migrated v1 routes get an id derived from their encrypted key, so it stays the same across reads.
+const migratedId = route => base32(createHash('sha256').update(String(route.key_enc)).digest().subarray(0, 5));
+
+function readJson(file) {
+  try { return JSON.parse(readFileSync(file, 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
+
+export function readRoutes(dir) {
+  const stored = readJson(join(dir, ROUTES_FILE));
+  if (stored?.version === 2 && Array.isArray(stored.routes)) return stored;
+  const old = readRoute(dir);
+  if (!old?.key_enc || !old.provider || !old.model) return {version: 2, default_id: 'ghostwire', routes: []};
+  const route = {id: migratedId(old), label: '', provider: old.provider, model: old.model, key_enc: old.key_enc, key_last4: old.key_last4 || '',
+    fallback: old.source !== 'user', updated_at: old.updated_at || 0};
+  return {version: 2, default_id: old.source === 'ghostwire' ? 'ghostwire' : route.id, routes: [route]};
+}
+
+export function writeRoutes(dir, store) {
+  const ids = new Set();
+  if (store?.version !== 2 || !Array.isArray(store.routes) || store.routes.length > MAX_ROUTES) throw Error('Invalid route store');
+  for (const route of store.routes) {
+    if (!ROUTE_ID.test(route?.id) || ids.has(route.id) || !route.provider || !validateModelId(route.model) || !route.key_enc) throw Error('Invalid route entry');
+    ids.add(route.id);
+  }
+  if (store.default_id !== 'ghostwire' && !ids.has(store.default_id)) throw Error('Default route does not exist');
+  const file = join(dir, ROUTES_FILE), temporary = file + '.tmp';
+  const descriptor = openSync(temporary, 'w', 0o600);
+  try { writeFileSync(descriptor, JSON.stringify(store)); fsyncSync(descriptor); } finally { closeSync(descriptor); }
+  renameSync(temporary, file);
+  // Keep the single-route file in step so an older broker still serves the default.
+  const chosen = store.routes.find(route => route.id === store.default_id);
+  const shown = chosen || store.routes[0];
+  if (!shown) { rmSync(join(dir, ROUTE_FILE), {force: true}); return; }
+  const source = !chosen ? 'ghostwire' : chosen.fallback ? 'user-then-ghostwire' : 'user';
+  writeRoute(dir, {version: 1, source, provider: shown.provider, model: shown.model, key_enc: shown.key_enc, key_last4: shown.key_last4, updated_at: shown.updated_at});
+}
+
+export function publicRoutes(store) {
+  return {default_id: store.default_id, routes: store.routes.map(({id, label, provider, model, key_last4, fallback}) => ({id, label, provider, model, key_last4, fallback}))};
 }

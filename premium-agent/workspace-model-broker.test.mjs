@@ -303,3 +303,88 @@ test('Ghost Wire route never gets provider rewrites', async t => {
   await (await s.call(undefined, {model: 'ghostwire', temperature: 0.1, messages: [{role: 'user', content: 'hi'}]})).text();
   assert.equal(JSON.parse(s.gwServer.hits[0].body).temperature, 0.1);
 });
+
+// ---- several saved routes -------------------------------------------------------------
+import {writeRoutes} from './model-route-core.mjs';
+async function setupRoutes({defaultId = 'aaaaaaaa', a, b, now} = {}) {
+  const serverA = await fake(a || ((req, res) => res.end('{"from":"A"}')));
+  const serverB = await fake(b || ((req, res) => res.end('{"from":"B"}')));
+  const gwServer = await fake((req, res) => res.end('{"from":"ghostwire"}'));
+  const dir = mkdtempSync(join(tmpdir(), 'broker-routes-')), master = randomBytes(32);
+  const masterKeyFile = join(dir, 'master'), filterFile = join(dir, 'filter.json'), routeDir = join(dir, 'route');
+  writeFileSync(masterKeyFile, master.toString('base64'));
+  writeFileSync(filterFile, JSON.stringify({deny: [], allow_only: {}, min_context_tokens: 0}));
+  (await import('node:fs')).mkdirSync(routeDir);
+  const KEY_A = 'sk-a-' + 'a'.repeat(40), KEY_B = 'sk-b-' + 'b'.repeat(40);
+  writeRoutes(routeDir, {version: 2, default_id: defaultId, routes: [
+    {id: 'aaaaaaaa', label: 'A', provider: 'pa', model: 'model-a', key_enc: encryptKey(master, KEY_A), key_last4: 'aaaa', fallback: true, updated_at: 1},
+    {id: 'bbbbbbbb', label: 'B', provider: 'pb', model: 'model-b', key_enc: encryptKey(master, KEY_B), key_last4: 'bbbb', fallback: false, updated_at: 1},
+  ]});
+  const registry = new Map([
+    ['pa', {id: 'pa', name: 'PA', base_url: serverA.url + '/v1', models_auth: 'bearer', key_pattern: null, enabled: true}],
+    ['pb', {id: 'pb', name: 'PB', base_url: serverB.url + '/v1', models_auth: 'bearer', key_pattern: null, enabled: true}],
+  ]);
+  const broker = createBroker({env: {WORKSPACE_MODE: 'premium', MODEL_ENDPOINT: gwServer.url + '/', MODEL_UPSTREAM_TOKEN: GW_KEY, WORKSPACE_MODEL_TOKEN: SCOPED, MODEL_ID: 'gw-model'},
+    routeDir, masterKeyFile, filterFile, registry, pollMs: 20, statsMs: 0, now});
+  broker.listen(0, '127.0.0.1'); await once(broker, 'listening');
+  const base = `http://127.0.0.1:${broker.address().port}`;
+  const ask = model => fetch(base + '/v1/chat/completions', {method: 'POST', headers: {authorization: 'Bearer ' + SCOPED, 'content-type': 'application/json'}, body: JSON.stringify({model, messages: [{role: 'user', content: 'hi'}]})});
+  const close = () => { broker.close(); serverA.close(); serverB.close(); gwServer.close(); };
+  return {serverA, serverB, gwServer, routeDir, base, ask, close, KEY_A, KEY_B};
+}
+
+test('routes: byok:<id> picks that route; other names use the default', async t => {
+  const s = await setupRoutes(); t.after(s.close);
+  assert.deepEqual(await (await s.ask('byok:bbbbbbbb')).json(), {from: 'B'});
+  assert.equal(s.serverB.hits[0].headers.authorization, 'Bearer ' + s.KEY_B);
+  assert.equal(JSON.parse(s.serverB.hits[0].body).model, 'model-b');
+  assert.deepEqual(await (await s.ask('ghostwire')).json(), {from: 'A'});
+  assert.deepEqual(await (await s.ask('byok:zzzzzzzz')).json(), {from: 'A'}, 'unknown id falls back to the default');
+  assert.equal(s.gwServer.hits.length, 0);
+});
+
+test('routes: Ghost Wire as default still lets a task pick a saved key', async t => {
+  const s = await setupRoutes({defaultId: 'ghostwire'}); t.after(s.close);
+  assert.deepEqual(await (await s.ask('ghostwire')).json(), {from: 'ghostwire'});
+  assert.deepEqual(await (await s.ask('byok:aaaaaaaa')).json(), {from: 'A'});
+});
+
+test('routes: a rejected key locks only its own route', async t => {
+  const s = await setupRoutes({b: (req, res) => { res.writeHead(401); res.end('{}'); }}); t.after(s.close);
+  const locked = await s.ask('byok:bbbbbbbb');
+  assert.equal(locked.status, 401, 'B has no fallback, so the provider error is returned');
+  await locked.text();
+  await (await s.ask('byok:bbbbbbbb')).text();
+  assert.equal(s.serverB.hits.length, 1, 'B is locked after the first 401');
+  assert.deepEqual(await (await s.ask('byok:aaaaaaaa')).json(), {from: 'A'}, 'A keeps working');
+});
+
+test('routes: /v1/models lists Ghost Wire and every saved route without keys', async t => {
+  const s = await setupRoutes(); t.after(s.close);
+  const list = await (await fetch(s.base + '/v1/models', {headers: {authorization: 'Bearer ' + SCOPED}})).json();
+  assert.deepEqual(list.data.map(m => m.id), ['ghostwire', 'byok:aaaaaaaa', 'byok:bbbbbbbb']);
+  assert.deepEqual(list.default_id, 'aaaaaaaa');
+  const b = list.data.find(m => m.id === 'byok:bbbbbbbb');
+  assert.deepEqual([b.label, b.provider, b.model, b.owned_by], ['B', 'pb', 'model-b', 'user']);
+  assert.ok(!JSON.stringify(list).includes(s.KEY_A));
+});
+
+test('routes: stats are counted per route', async t => {
+  const s = await setupRoutes(); t.after(s.close);
+  await (await s.ask('byok:bbbbbbbb')).text();
+  await (await s.ask('ghostwire')).text();
+  const stats = JSON.parse(readFileSync(join(s.routeDir, STATS_FILE), 'utf8'));
+  assert.equal(stats.routes.bbbbbbbb.user, 1);
+  assert.equal(stats.routes.aaaaaaaa.user, 1);
+});
+
+test('routes: per-route stats cover only the last 24 hours', async t => {
+  let clock = 1_000 * 3600 * 1000;
+  const s = await setupRoutes({now: () => clock}); t.after(s.close);
+  await (await s.ask('byok:bbbbbbbb')).text();
+  clock += 25 * 3600 * 1000;
+  await (await s.ask('byok:aaaaaaaa')).text();
+  const stats = JSON.parse(readFileSync(join(s.routeDir, STATS_FILE), 'utf8'));
+  assert.equal(stats.routes.aaaaaaaa.user, 1);
+  assert.equal(stats.routes.bbbbbbbb, undefined, 'older than 24 h drops out');
+});

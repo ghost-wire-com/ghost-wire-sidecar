@@ -138,6 +138,13 @@ func (r *taskLLMRuntime) current() (taskLLMSelection, error) {
 		sel.provider, sel.retry = prov, cfg.Retry
 		return sel, nil
 	}
+	if route := r.s.pinnedRoute("task", taskNum); route != "" {
+		// Workspace only: the task picked one of the user's saved keys.
+		if prov, cfg, ok := r.s.routeProvider(route); ok {
+			sel.provider, sel.retry = prov, cfg.Retry
+			return sel, nil
+		}
+	}
 	prov, cfg, ok := r.s.globalProvider()
 	if !ok {
 		return sel, fmt.Errorf("task %s has no available fallback LLM provider", r.taskID)
@@ -165,6 +172,11 @@ func (r *taskLLMRuntime) activeCfg() (agent.Config, bool) {
 	}
 	if len(pt.LLMProfileIDs) > 0 && pt.ActiveLLMProfileID != nil {
 		if _, cfg, ok := r.s.providerForProfile(*pt.ActiveLLMProfileID); ok {
+			return cfg, true
+		}
+	}
+	if route := r.s.pinnedRoute("task", taskNum); route != "" {
+		if _, cfg, ok := r.s.routeProvider(route); ok {
 			return cfg, true
 		}
 	}

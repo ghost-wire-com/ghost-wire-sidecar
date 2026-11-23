@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-const roots = new Set(['companies','task-archives','audit','triggers','asset-intercept','health','tasks','task-categories','task-templates','assets','asset-groups','exploration','report','conversations','chat','agents','tools','skills','workspace','traffic','commands','usage','stats','token-stats','tokens','side-questions','coverage','llm-records','intercept','judge','llm','mcp','notify','settings','logs','visibility']);
+const roots = new Set(['model-routes','companies','task-archives','audit','triggers','asset-intercept','health','tasks','task-categories','task-templates','assets','asset-groups','exploration','report','conversations','chat','agents','tools','skills','workspace','traffic','commands','usage','stats','token-stats','tokens','side-questions','coverage','llm-records','intercept','judge','llm','mcp','notify','settings','logs','visibility']);
 const digest = value => createHash('sha256').update(value).digest('hex');
 export function createEngineProxy(config, db, json) {
  db.exec(`CREATE TABLE IF NOT EXISTS workspace_requests (request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, status INTEGER, content_type TEXT, response BLOB)`);

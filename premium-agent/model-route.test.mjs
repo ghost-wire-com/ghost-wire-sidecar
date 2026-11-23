@@ -207,3 +207,86 @@ test('model listing stops reading an oversized response', {timeout: 5000}, async
   assert.deepEqual(body, {models: [], listing: 'unavailable'});
   assert.ok(sent < 8 * 1024 * 1024);
 });
+
+// ---- several saved keys (/routes) ----------------------------------------------------
+import {readRoutes} from './model-route-core.mjs';
+const GEMINI_KEY = 'AQ.' + 'g'.repeat(40);
+const addRoute = (s, body) => s.call('POST', '/routes', {provider: 'openai', model: 'gpt-5', key: OPENAI_KEY, fallback: true, ...body});
+
+test('routes: add tests the key, stores it encrypted and never returns it; first route becomes default', async t => {
+  const s = await setup(); t.after(s.close);
+  const response = await addRoute(s, {label: 'Work OpenAI'});
+  assert.equal(response.status, 200);
+  const created = await response.json();
+  assert.match(created.route.id, /^[a-z2-7]{8}$/);
+  assert.equal(s.calls.filter(c => c.url.endsWith('/chat/completions')).length, 1);
+  const list = await (await s.call('GET', '/routes')).json();
+  assert.equal(list.default_id, created.route.id);
+  assert.deepEqual(list.routes.map(r => [r.label, r.provider, r.model, r.key_last4, r.fallback]), [['Work OpenAI', 'openai', 'gpt-5', 'aaaa', true]]);
+  assert.ok(!JSON.stringify(list).includes(OPENAI_KEY));
+  const stored = readRoutes(s.modelRouteDir).routes[0];
+  assert.equal(decryptKey(readMasterKey(s.modelRouteKeyFile), stored.key_enc), OPENAI_KEY);
+});
+
+test('routes: a second route does not steal the default; label defaults to provider and model', async t => {
+  const s = await setup(); t.after(s.close);
+  const first = (await (await addRoute(s)).json()).route;
+  const second = (await (await addRoute(s, {provider: 'gemini', model: 'gemini-3.5-flash-lite', key: GEMINI_KEY, label: undefined})).json()).route;
+  const list = await (await s.call('GET', '/routes')).json();
+  assert.equal(list.default_id, first.id);
+  assert.equal(list.routes.find(r => r.id === second.id).label, 'Google Gemini · gemini-3.5-flash-lite');
+});
+
+test('routes: a rejected key is not saved', async t => {
+  const s = await setup({reply: url => new Response('{}', {status: url.endsWith('/chat/completions') ? 401 : 200})}); t.after(s.close);
+  const response = await addRoute(s);
+  assert.equal((await response.json()).code, 'key_rejected');
+  assert.equal((await (await s.call('GET', '/routes')).json()).routes.length, 0);
+});
+
+test('routes: update re-tests only when key or model change; label and fallback do not', async t => {
+  const s = await setup(); t.after(s.close);
+  const {route} = await (await addRoute(s)).json();
+  const before = s.calls.length;
+  await s.call('PUT', '/routes/' + route.id, {label: 'Renamed', fallback: false});
+  assert.equal(s.calls.length, before, 'no provider call for label/fallback');
+  await s.call('PUT', '/routes/' + route.id, {model: 'gpt-5-mini'});
+  assert.equal(s.calls.length, before + 1, 'model change tests with the stored key');
+  assert.equal(s.calls.at(-1).init.headers.authorization, 'Bearer ' + OPENAI_KEY);
+  const list = await (await s.call('GET', '/routes')).json();
+  assert.deepEqual([list.routes[0].label, list.routes[0].model, list.routes[0].fallback], ['Renamed', 'gpt-5-mini', false]);
+  assert.equal((await s.call('PUT', '/routes/zzzzzzzz', {label: 'x'})).status, 404);
+});
+
+test('routes: set default, and deleting the default falls back to Ghost Wire', async t => {
+  const s = await setup(); t.after(s.close);
+  const a = (await (await addRoute(s)).json()).route;
+  const b = (await (await addRoute(s, {provider: 'gemini', model: 'gemini-3.5-flash-lite', key: GEMINI_KEY})).json()).route;
+  assert.equal((await s.call('PUT', '/default', {id: b.id})).status, 200);
+  assert.equal((await (await s.call('GET', '/routes')).json()).default_id, b.id);
+  assert.equal((await s.call('PUT', '/default', {id: 'zzzzzzzz'})).status, 404);
+  await s.call('DELETE', '/routes/' + b.id);
+  const list = await (await s.call('GET', '/routes')).json();
+  assert.equal(list.default_id, 'ghostwire');
+  assert.deepEqual(list.routes.map(r => r.id), [a.id]);
+  assert.equal((await s.call('PUT', '/default', {id: 'ghostwire'})).status, 200);
+});
+
+test('routes: at most 12 saved keys', async t => {
+  const s = await setup(); t.after(s.close);
+  for (let i = 0; i < 12; i++) assert.equal((await addRoute(s, {label: 'k' + i})).status, 200);
+  const response = await addRoute(s, {label: 'one too many'});
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).code, 'too_many_routes');
+});
+
+test('legacy single-route endpoints act on the default route', async t => {
+  const s = await setup(); t.after(s.close);
+  await addRoute(s, {label: 'A'});
+  await addRoute(s, {provider: 'gemini', model: 'gemini-3.5-flash-lite', key: GEMINI_KEY, label: 'B'});
+  const view = await (await s.call('GET', '')).json();
+  assert.deepEqual([view.configured, view.provider, view.model], [true, 'openai', 'gpt-5']);
+  await save(s, {source: 'ghostwire'});
+  assert.equal((await (await s.call('GET', '/routes')).json()).default_id, 'ghostwire');
+  assert.equal((await (await s.call('GET', '/routes')).json()).routes.length, 2, 'switching to Ghost Wire keeps saved keys');
+});

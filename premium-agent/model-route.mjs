@@ -1,11 +1,12 @@
 // Workspace model-route settings: save, test and remove the user's own provider
 // API key. Keys are encrypted at rest and never returned or logged.
-import {existsSync, readFileSync, rmSync} from 'node:fs';
+import {existsSync, readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {
   loadRegistry, loadFilter, modelAllowed, validateKey, validateModelId, readMasterKey, normalizeKey,
-  encryptKey, decryptKey, readRoute, writeRoute, modelIds, SOURCES, ROUTE_FILE, STATS_FILE,
+  encryptKey, decryptKey, modelIds, SOURCES, STATS_FILE,
+  readRoutes, writeRoutes, newRouteId, publicRoutes, MAX_ROUTES, ROUTE_ID,
 } from './model-route-core.mjs';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -68,15 +69,40 @@ export function createModelRouteHandler(config, json, deps = {}) {
       return {models: modelIds(raw).filter(id => modelAllowed(filter, entry.id, id, context.get(id)))};
     } catch { return {models: [], listing: 'unavailable'}; }
   }
-  function view(dir, keyFile) {
-    const route = readRoute(dir);
-    let keyUnreadable = false;
-    if (route?.key_enc) { try { decryptKey(readMasterKey(keyFile), route.key_enc); } catch { keyUnreadable = true; } }
-    let stats = null;
-    try { stats = JSON.parse(readFileSync(join(dir, STATS_FILE), 'utf8')); } catch {}
-    return {configured: Boolean(route?.key_enc), source: route?.source || 'ghostwire', provider: route?.provider || null, model: route?.model || null,
-      key_last4: route?.key_last4 || null, key_unreadable: keyUnreadable, stats, mode: config.workspaceMode || 'premium'};
+  function readStats(dir) {
+    try { return JSON.parse(readFileSync(join(dir, STATS_FILE), 'utf8')); } catch { return null; }
   }
+  function unreadable(keyFile, route) {
+    if (!route?.key_enc) return false;
+    try { decryptKey(readMasterKey(keyFile), route.key_enc); return false; } catch { return true; }
+  }
+  // Legacy single-route view: the default route (or, when Ghost Wire is the default, the first saved key).
+  function view(dir, keyFile) {
+    const store = readRoutes(dir);
+    const chosen = store.routes.find(route => route.id === store.default_id), shown = chosen || store.routes[0];
+    const source = !chosen ? 'ghostwire' : chosen.fallback ? 'user-then-ghostwire' : 'user';
+    return {configured: Boolean(shown), source, provider: shown?.provider || null, model: shown?.model || null,
+      key_last4: shown?.key_last4 || null, key_unreadable: unreadable(keyFile, shown), stats: readStats(dir), mode: config.workspaceMode || 'premium'};
+  }
+  function routesView(dir, keyFile) {
+    const store = readRoutes(dir), result = publicRoutes(store);
+    result.routes = result.routes.map(route => ({...route, key_unreadable: unreadable(keyFile, store.routes.find(r => r.id === route.id))}));
+    return {...result, stats: readStats(dir), mode: config.workspaceMode || 'premium'};
+  }
+  const cleanLabel = (value, fallback) => (typeof value === 'string' && value.trim() ? value.trim().slice(0, 60) : fallback);
+  // Test (when needed) then encrypt; returns the stored fields.
+  async function prepareKey(registry, filter, keyFile, {provider: providerId, model, key}, existing) {
+    const entry = provider(registry, providerId); checkModel(filter, entry, model);
+    const master = readMasterKey(keyFile);
+    let plain = key, keyEnc;
+    if (plain === undefined && existing?.key_enc && existing.provider === entry.id) {
+      try { plain = decryptKey(master, existing.key_enc); keyEnc = existing.key_enc; } catch { plain = undefined; }
+    }
+    checkKey(entry, plain);
+    if (!keyEnc || existing.model !== model) await testCall(entry, model, plain);
+    return {entry, key_enc: keyEnc || encryptKey(master, plain), key_last4: plain.slice(-4)};
+  }
+  const tooMany = () => fail('too_many_routes', 'You can save up to ' + MAX_ROUTES + ' keys. Remove one first.', 409);
 
   return async (req, res) => {
     const path = req.url.split('?')[0];
@@ -100,25 +126,79 @@ export function createModelRouteHandler(config, json, deps = {}) {
         await testCall(entry, body.model, body.key);
         return json(res, 200, {ok: true}), true;
       }
+      if (sub === '/routes' || sub.startsWith('/routes/') || sub === '/default') {
+        const store = readRoutes(dir);
+        const id = sub.startsWith('/routes/') ? sub.slice('/routes/'.length) : null;
+        if (sub === '/routes' && method === 'GET') return json(res, 200, routesView(dir, keyFile)), true;
+        if (sub === '/routes' && method === 'POST') {
+          if (store.routes.length >= MAX_ROUTES) tooMany();
+          const prepared = await prepareKey(registry, filter, keyFile, body, null);
+          const route = {id: newRouteId(), label: cleanLabel(body.label, prepared.entry.name + ' · ' + body.model), provider: prepared.entry.id, model: body.model,
+            key_enc: prepared.key_enc, key_last4: prepared.key_last4, fallback: body.fallback !== false, updated_at: Date.now()};
+          store.routes.push(route);
+          if (store.routes.length === 1) store.default_id = route.id;
+          writeRoutes(dir, store);
+          return json(res, 200, {route: publicRoutes({default_id: store.default_id, routes: [route]}).routes[0], default_id: store.default_id}), true;
+        }
+        if (id !== null) {
+          if (!ROUTE_ID.test(id)) fail('not_found', 'Not found', 404);
+          const index = store.routes.findIndex(route => route.id === id);
+          if (index < 0) fail('not_found', 'That key was not found.', 404);
+          if (method === 'DELETE') {
+            store.routes.splice(index, 1);
+            if (store.default_id === id) store.default_id = 'ghostwire';
+            writeRoutes(dir, store);
+            return json(res, 200, routesView(dir, keyFile)), true;
+          }
+          if (method === 'PUT') {
+            const current = store.routes[index];
+            const next = {...current, label: cleanLabel(body.label, current.label), fallback: typeof body.fallback === 'boolean' ? body.fallback : current.fallback};
+            if (body.key !== undefined || (body.model !== undefined && body.model !== current.model)) {
+              const prepared = await prepareKey(registry, filter, keyFile, {provider: current.provider, model: body.model ?? current.model, key: body.key}, current);
+              Object.assign(next, {model: body.model ?? current.model, key_enc: prepared.key_enc, key_last4: prepared.key_last4});
+            }
+            next.updated_at = Date.now();
+            store.routes[index] = next;
+            writeRoutes(dir, store);
+            return json(res, 200, routesView(dir, keyFile)), true;
+          }
+        }
+        if (sub === '/default' && method === 'PUT') {
+          if (body.id !== 'ghostwire' && !store.routes.some(route => route.id === body.id)) fail('not_found', 'That key was not found.', 404);
+          store.default_id = body.id;
+          writeRoutes(dir, store);
+          return json(res, 200, routesView(dir, keyFile)), true;
+        }
+        fail('not_found', 'Not found', 405);
+      }
       if (sub !== '') fail('not_found', 'Not found', 404);
       if (method === 'GET') return json(res, 200, view(dir, keyFile)), true;
-      if (method === 'DELETE') { rmSync(join(dir, ROUTE_FILE), {force: true}); return json(res, 200, {configured: false, source: 'ghostwire'}), true; }
+      const store = readRoutes(dir);
+      const chosen = store.routes.find(route => route.id === store.default_id);
+      if (method === 'DELETE') {
+        const target = chosen || store.routes[0];
+        if (target) store.routes = store.routes.filter(route => route !== target);
+        store.default_id = 'ghostwire';
+        writeRoutes(dir, store);
+        return json(res, 200, {configured: false, source: 'ghostwire'}), true;
+      }
       if (method !== 'PUT') fail('not_found', 'Not found', 405);
       if (!SOURCES.includes(body.source)) fail('invalid_source', 'Choose a model source.');
-      const stored = readRoute(dir);
       if (body.source === 'ghostwire') {
-        writeRoute(dir, stored?.key_enc ? {...stored, source: 'ghostwire', updated_at: Date.now()} : {version: 1, source: 'ghostwire', updated_at: Date.now()});
+        store.default_id = 'ghostwire';
+        writeRoutes(dir, store);
         return json(res, 200, view(dir, keyFile)), true;
       }
-      const entry = provider(registry, body.provider); checkModel(filter, entry, body.model);
-      const master = readMasterKey(keyFile);
-      let key = body.key, keyEnc;
-      if (key === undefined && stored?.key_enc && stored.provider === entry.id) {
-        try { key = decryptKey(master, stored.key_enc); keyEnc = stored.key_enc; } catch { key = undefined; }
-      }
-      checkKey(entry, key);
-      if (!keyEnc || stored.model !== body.model) await testCall(entry, body.model, key);
-      writeRoute(dir, {version: 1, source: body.source, provider: entry.id, model: body.model, key_enc: keyEnc || encryptKey(master, key), key_last4: key.slice(-4), updated_at: Date.now()});
+      // Legacy save: update the default (or the key for the same provider), else add a new default.
+      const existing = chosen || store.routes.find(route => route.provider === body.provider) || null;
+      if (!existing && store.routes.length >= MAX_ROUTES) tooMany();
+      const sameProvider = existing && existing.provider === body.provider ? existing : null;
+      const prepared = await prepareKey(registry, filter, keyFile, body, sameProvider);
+      const route = {id: existing?.id || newRouteId(), label: sameProvider ? existing.label : prepared.entry.name + ' · ' + body.model,
+        provider: prepared.entry.id, model: body.model, key_enc: prepared.key_enc, key_last4: prepared.key_last4, fallback: body.source === 'user-then-ghostwire', updated_at: Date.now()};
+      store.routes = existing ? store.routes.map(r => (r.id === existing.id ? route : r)) : [...store.routes, route];
+      store.default_id = route.id;
+      writeRoutes(dir, store);
       return json(res, 200, view(dir, keyFile)), true;
     } catch (error) {
       if (error instanceof RouteError) json(res, error.status, {error: error.message, code: error.code});

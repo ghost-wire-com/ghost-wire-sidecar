@@ -79,8 +79,13 @@ func (s *Server) pgCreateConversation(w http.ResponseWriter, r *http.Request) {
 		AgentKey     string `json:"agent_key"`
 		Title        string `json:"title"`
 		LLMProfileID *int64 `json:"llm_profile_id"`
+		ModelRoute   string `json:"model_route"` // workspace only: one of the user's saved keys
 	}
 	if !decodeConversationRequest(w, r, &req) {
+		return
+	}
+	if !db.ValidModelRoute(req.ModelRoute) {
+		writeErr(w, 400, "model_route must be empty, \"ghostwire\" or \"byok:<id>\"")
 		return
 	}
 	req.AgentKey = strings.TrimSpace(req.AgentKey)
@@ -119,6 +124,12 @@ func (s *Server) pgCreateConversation(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
+	}
+	if req.ModelRoute != "" {
+		if err := pg.SetModelRoute("conversation", c.ID, req.ModelRoute); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
 	}
 	writeJSON(w, 200, c)
 }

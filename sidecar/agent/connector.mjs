@@ -28,5 +28,7 @@ export function connectorConfig(stateDir) {
     modelRouteDir: '/route', modelRouteKeyFile: join(stateDir, 'model-route.key'),
     // Own-PC installs have no mining node; without miningSecret the proxy never calls this placeholder.
     miningOrigin: 'http://127.0.0.1:1/',
+    // "My keys" chat from the console goes straight to the broker on the private network.
+    modelChat: {url: 'http://model-broker:8791', token: read(stateDir, 'scoped-token')},
   };
 }

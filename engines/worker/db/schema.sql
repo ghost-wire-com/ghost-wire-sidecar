@@ -1391,3 +1391,13 @@ CREATE INDEX IF NOT EXISTS idx_notification_deliveries_batch
     ON notification_deliveries(batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_notification_deliveries_channel
     ON notification_deliveries(channel_id, id DESC);
+
+-- Bring-your-own-key: which saved AI key a conversation/task uses in a workspace
+-- ("byok:<id>" or "ghostwire"; no row = the workspace default).
+CREATE TABLE IF NOT EXISTS model_route_pins (
+    kind        TEXT        NOT NULL CHECK (kind IN ('conversation','task')),
+    ref_id      BIGINT      NOT NULL,
+    model_route TEXT        NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (kind, ref_id)
+);
